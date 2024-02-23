@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/video/info", get(video_info))
         .route("/api/log", post(logger));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3123").await?;
+    let listener = tokio::net::TcpListener::bind("192.168.178.30:3123").await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
