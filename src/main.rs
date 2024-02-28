@@ -268,6 +268,7 @@ async fn ping_handler() -> &'static str {
 
 fn controller() -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind("192.168.178.30:3123")?;
+    tcp_listener.set_nonblocking(true)?;
 
     while let Ok((stream, _)) = tcp_listener.accept() {
         if let Err(e) = handle_esp_client(stream) {
@@ -280,6 +281,7 @@ fn controller() -> anyhow::Result<()> {
 fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     tcp_stream.set_nodelay(true)?;
+    tcp_stream.set_nonblocking(true)?;
     let mut client_is_receiving = false;
     let mut receive_buffer = [0_u8; 1];
 
