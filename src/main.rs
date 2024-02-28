@@ -97,6 +97,7 @@ impl VideoFrameIterator {
     }
 }
 
+#[derive(Debug)]
 struct DisplayFrame([u8; 256]);
 
 #[async_trait]
@@ -268,6 +269,7 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
                 .next()
                 .await
                 .unwrap();
+            println!("Sending frame: {next_frame:?}");
             tcp_stream.write_all(&next_frame.0).await?;
         } else {
             poll_ticker.tick().await;
