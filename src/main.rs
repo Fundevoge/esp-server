@@ -42,9 +42,10 @@ static PLAYBACK_STREAM: Mutex<Option<Box<dyn AsyncIterator<Item = DisplayFrame> 
 pub trait AsyncIterator {
     type Item;
     async fn next(&mut self) -> Option<Self::Item>;
+    fn fps(&self) -> f32;
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 struct VideoMetadata {
     fps: f32,
 }
@@ -53,9 +54,10 @@ struct VideoFrameIterator {
     ticker: Interval,
     buffer: Vec<u8>,
     offset: usize,
+    metadata: VideoMetadata,
 }
 
-async fn get_video_metadata(file_name: &str) -> Option<serde_json::Value> {
+async fn get_video_metadata(file_name: &str) -> Option<VideoMetadata> {
     let videos_meta_file_ids = VIDEO_META_FILE_IDS.read().await;
     let videos_meta_file_names = VIDEO_META_FILE_NAMES.read().await;
     let video_meta_file_id = *videos_meta_file_ids.get(file_name)?;
@@ -85,14 +87,15 @@ async fn get_video_frames(file_name: &str) -> Option<Vec<u8>> {
 
 impl VideoFrameIterator {
     async fn from_file_name(file_name: &str) -> Option<Self> {
-        let fps = get_video_metadata(file_name).await?["FPS"].as_f64()?;
-        let ticker = time::interval(Duration::from_micros((1e6 / fps) as u64));
+        let metadata = get_video_metadata(file_name).await?;
+        let ticker = time::interval(Duration::from_micros((1e6 / metadata.fps).round() as u64));
         let frames = get_video_frames(file_name).await?;
 
         Some(VideoFrameIterator {
             ticker,
             buffer: frames,
             offset: 0,
+            metadata,
         })
     }
 }
@@ -116,6 +119,10 @@ impl AsyncIterator for VideoFrameIterator {
         self.offset += 256;
         self.ticker.tick().await;
         Some(next_frame)
+    }
+
+    fn fps(&self) -> f32 {
+        self.metadata.fps
     }
 }
 
@@ -278,6 +285,10 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
 
         if let Ok(1) = tcp_stream.try_read(&mut receive_buffer) {
             client_is_receiving = receive_buffer[0] == 0xff;
+            if client_is_receiving {
+                let fps = PLAYBACK_STREAM.lock().await.as_ref().unwrap().fps();
+                tcp_stream.write_f32_le(fps).await?;
+            }
         }
     }
 }
