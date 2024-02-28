@@ -1,14 +1,14 @@
 use std::{
     collections::HashMap,
     io::{self, ErrorKind, Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     ops::DerefMut,
     path::PathBuf,
     thread,
     time::Duration,
 };
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use axum::{
     async_trait,
     extract::Query,
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
     io::AsyncReadExt,
+    net::TcpSocket,
     sync::{Mutex, RwLock, RwLockWriteGuard},
     time::{self, Interval},
 };
@@ -294,7 +295,7 @@ fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> 
             let mut playback_stream_lock = rt.block_on(PLAYBACK_STREAM.lock());
             let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
             let next_frame = rt.block_on(frame_iter.next()).unwrap();
-            tcp_stream.write_all(&next_frame.0).unwrap();
+            write_all(&mut tcp_stream, &next_frame.0)?;
         } else {
             thread::sleep(Duration::from_millis(50));
         }
@@ -308,7 +309,7 @@ fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> 
                     let fps = rt.block_on(PLAYBACK_STREAM.lock()).as_ref().unwrap().fps();
                     let mut temp_buf = [0_u8; 4];
                     byteorder::LE::write_f32(&mut temp_buf, fps);
-                    tcp_stream.write_all(&temp_buf).unwrap();
+                    write_all(&mut tcp_stream, &temp_buf)?;
                 }
             }
             Err(e) => match e.kind() {
@@ -320,4 +321,24 @@ fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> 
             _ => {}
         }
     }
+}
+
+fn write_all(tcp_stream: &mut TcpStream, bytes: &[u8]) -> anyhow::Result<()> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        match tcp_stream.write(&bytes[offset..]) {
+            Ok(0) => bail!("TcpStream invalid"),
+            Ok(n) => {
+                offset += n;
+            }
+            Err(e) => match e.kind() {
+                ErrorKind::WouldBlock => {}
+                _ => {
+                    println!("Error writing to tcp socket: {e}");
+                    return Err(e.into());
+                }
+            },
+        }
+    }
+    Ok(())
 }
