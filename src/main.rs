@@ -273,7 +273,7 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
     tcp_stream.set_nodelay(true)?;
     let mut client_is_receiving = false;
     let mut receive_buffer = [0_u8; 1];
-    let mut poll_ticker = tokio::time::interval(Duration::from_millis(1000));
+    let mut poll_ticker = tokio::time::interval(Duration::from_millis(50));
     loop {
         if client_is_receiving {
             let mut playback_stream_lock = PLAYBACK_STREAM.lock().await;
@@ -291,6 +291,8 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
                 let fps = PLAYBACK_STREAM.lock().await.as_ref().unwrap().fps();
                 tcp_stream.write_f32_le(fps).await?;
             }
+        } else {
+            println!("Polled but no data");
         }
     }
 }
