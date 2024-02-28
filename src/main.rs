@@ -1,7 +1,8 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, ops::DerefMut, path::PathBuf, time::Duration};
 
 use anyhow::Context;
 use axum::{
+    async_trait,
     extract::Query,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -9,106 +10,176 @@ use axum::{
     Router,
 };
 use once_cell::sync::Lazy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::{Mutex, RwLock, RwLockWriteGuard},
+    time::{self, Interval},
 };
 
 const VIDEOS_DIR: &str = "videos";
+const VIDEOS_META_DIR: &str = "videos_meta";
+const SCRIPTS_DIR: &str = "scripts";
 
-static FILE_NAMES: Lazy<RwLock<Vec<(PathBuf, usize)>>> = Lazy::new(|| RwLock::new(Vec::new()));
-static FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+static VIDEO_FILE_NAMES: RwLock<Vec<PathBuf>> = RwLock::const_new(Vec::new());
+static VIDEO_FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> =
+    Lazy::new(|| RwLock::const_new(HashMap::new()));
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut file_names: RwLockWriteGuard<'_, Vec<_>> = FILE_NAMES.write().await;
-    let mut file_ids: RwLockWriteGuard<'_, HashMap<_, _>> = FILE_IDS.write().await;
-    for (index, file) in std::fs::read_dir(VIDEOS_DIR)?
+static VIDEO_META_FILE_NAMES: RwLock<Vec<PathBuf>> = RwLock::const_new(Vec::new());
+static VIDEO_META_FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> =
+    Lazy::new(|| RwLock::const_new(HashMap::new()));
+
+static SCRIPT_FILE_NAMES: RwLock<Vec<PathBuf>> = RwLock::const_new(Vec::new());
+static SCRIPT_FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> =
+    Lazy::new(|| RwLock::const_new(HashMap::new()));
+
+static PLAYBACK_STREAM: Mutex<Option<Box<dyn AsyncIterator<Item = DisplayFrame> + Sync + Send>>> =
+    Mutex::const_new(None);
+
+#[async_trait]
+pub trait AsyncIterator {
+    type Item;
+    async fn next(&mut self) -> Option<Self::Item>;
+}
+
+#[derive(Serialize, Deserialize)]
+struct VideoMetadata {
+    fps: f32,
+}
+
+struct VideoFrameIterator {
+    ticker: Interval,
+    buffer: Vec<u8>,
+    offset: usize,
+}
+
+async fn get_video_metadata(file_name: &str) -> Option<serde_json::Value> {
+    let videos_meta_file_ids = VIDEO_META_FILE_IDS.read().await;
+    let videos_meta_file_names = VIDEO_META_FILE_NAMES.read().await;
+    let video_meta_file_id = *videos_meta_file_ids.get(file_name)?;
+    let video_meta_file_name = videos_meta_file_names.get(video_meta_file_id)?;
+    let mut video_metadata = String::new();
+    let mut file = File::open(video_meta_file_name).await.ok()?;
+    drop(videos_meta_file_ids);
+    drop(videos_meta_file_names);
+
+    file.read_to_string(&mut video_metadata).await.ok()?;
+    serde_json::from_str(&video_metadata).ok()
+}
+
+async fn get_video_frames(file_name: &str) -> Option<Vec<u8>> {
+    let videos_file_ids = VIDEO_FILE_IDS.read().await;
+    let videos_file_names = VIDEO_FILE_NAMES.read().await;
+    let video_file_id = *videos_file_ids.get(file_name)?;
+    let video_file_name = videos_file_names.get(video_file_id)?;
+    let mut video_frames = Vec::new();
+    let mut file = File::open(video_file_name).await.ok()?;
+    drop(videos_file_ids);
+    drop(videos_file_names);
+
+    file.read_to_end(&mut video_frames).await.ok()?;
+    Some(video_frames)
+}
+
+impl VideoFrameIterator {
+    async fn from_file_name(file_name: &str) -> Option<Self> {
+        let fps = get_video_metadata(file_name).await?["FPS"].as_f64()?;
+        let ticker = time::interval(Duration::from_micros((1e6 / fps) as u64));
+        let frames = get_video_frames(file_name).await?;
+
+        Some(VideoFrameIterator {
+            ticker,
+            buffer: frames,
+            offset: 0,
+        })
+    }
+}
+
+struct DisplayFrame([u8; 256]);
+
+#[async_trait]
+impl AsyncIterator for VideoFrameIterator {
+    type Item = DisplayFrame;
+
+    async fn next(&mut self) -> Option<DisplayFrame> {
+        self.ticker.tick().await;
+        (self.offset + 256 <= self.buffer.len()).then(|| {
+            self.offset += 256;
+            DisplayFrame(
+                <[u8; 256]>::try_from(&self.buffer[self.offset - 256..self.offset]).unwrap(),
+            )
+        })
+    }
+}
+
+fn initialize_file_map(
+    dir: &str,
+    file_extension: &str,
+    mut file_names: RwLockWriteGuard<'_, Vec<PathBuf>>,
+    mut file_ids: RwLockWriteGuard<'_, HashMap<String, usize>>,
+) -> anyhow::Result<()> {
+    for (index, file) in std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .enumerate()
     {
         let file_name = file.file_name().unwrap().to_string_lossy();
-        let Some(file_name_no_extension) = file_name.strip_suffix(".bin") else {
+        let Some(file_name_no_extension) = file_name.strip_suffix(file_extension) else {
             continue;
         };
         file_ids.insert(file_name_no_extension.to_string(), index);
 
-        let file_size = file.metadata()?.len() as usize;
-        file_names.push((file, file_size));
+        file_names.push(file);
     }
     drop(file_names);
     drop(file_ids);
+    Ok(())
+}
 
-    let app = Router::new()
-        .route("/api/video/frames", get(frames))
-        .route("/api/video/info", get(video_info))
-        .route("/api/log", post(logger));
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    initialize_file_map(
+        VIDEOS_DIR,
+        ".bin",
+        VIDEO_FILE_NAMES.write().await,
+        VIDEO_FILE_IDS.write().await,
+    )?;
+    initialize_file_map(
+        VIDEOS_META_DIR,
+        ".json",
+        VIDEO_META_FILE_NAMES.write().await,
+        VIDEO_META_FILE_IDS.write().await,
+    )?;
+    initialize_file_map(
+        SCRIPTS_DIR,
+        ".js",
+        SCRIPT_FILE_NAMES.write().await,
+        SCRIPT_FILE_IDS.write().await,
+    )?;
 
-    let listener = tokio::net::TcpListener::bind("192.168.178.30:3123").await?;
-    axum::serve(listener, app)
+    let mut playback_stream = PLAYBACK_STREAM.lock().await;
+    playback_stream.deref_mut().replace(Box::new(
+        VideoFrameIterator::from_file_name("Bad Apple")
+            .await
+            .unwrap(),
+    ));
+
+    let app_router = Router::new()
+        .route("/", get(root_handler))
+        .route("/api/persist_video_upload", post(persist_video_upload))
+        .route("/api/temp_video_upload", post(temp_video_upload))
+        .route("/api/persist_script_upload", post(persist_script_upload))
+        .route("/api/temp_script_upload", post(temp_script_upload));
+
+    let http_listener = tokio::net::TcpListener::bind("192.168.178.30:3122").await?;
+    tokio::spawn(controller());
+    axum::serve(http_listener, app_router)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("error running HTTP server")
-}
-
-#[derive(Deserialize)]
-struct FrameInfo {
-    id: usize,
-    start: usize,
-    length: usize,
-}
-
-async fn frames(Query(frame_query): Query<FrameInfo>) -> Result<Vec<u8>, AppError> {
-    let file_names: RwLockReadGuard<'_, Vec<(PathBuf, usize)>> = FILE_NAMES.read().await;
-    let Some((file_name, file_size)) = file_names.get(frame_query.id) else {
-        return Err(anyhow::anyhow!("Video with id {} does not exist", frame_query.id).into());
-    };
-    if frame_query.start * 256 >= *file_size {
-        return Err(anyhow::anyhow!("Frame {} does not exist", frame_query.start).into());
-    }
-    let file_name = file_name.clone();
-    let file_size = *file_size;
-    drop(file_names);
-
-    let mut file = File::open(file_name).await?;
-
-    file.seek(std::io::SeekFrom::Start((frame_query.start * 256) as u64))
-        .await?;
-
-    let content_length = usize::min(
-        frame_query.length * 256,
-        file_size - frame_query.start * 256,
-    );
-
-    let mut buffer = Vec::with_capacity(content_length + 4);
-    buffer.write_u32(content_length as u32).await?;
-    buffer.extend([0].iter().cycle().take(content_length));
-    file.read_exact(&mut buffer[4..]).await?;
-
-    Ok(buffer)
-}
-
-#[derive(Deserialize)]
-struct VideoInfo {
-    name: String,
-}
-
-async fn video_info(Query(video_query): Query<VideoInfo>) -> Result<String, AppError> {
-    let file_ids: RwLockReadGuard<'_, HashMap<_, usize>> = FILE_IDS.read().await;
-    let Some(&file_id) = file_ids.get(&video_query.name) else {
-        return Err(anyhow::anyhow!("Video {} does not exist", video_query.name).into());
-    };
-    drop(file_ids);
-
-    let file_names: RwLockReadGuard<'_, Vec<(PathBuf, usize)>> = FILE_NAMES.read().await;
-    let file_size = file_names[file_id].1;
-    drop(file_names);
-
-    Ok(format!("{file_id},{file_size}"))
 }
 
 struct AppError(anyhow::Error);
@@ -152,6 +223,44 @@ async fn shutdown_signal() {
     }
 }
 
-async fn logger(body: String) {
-    println!("{body}");
+async fn persist_video_upload() {
+    todo!()
+}
+async fn temp_video_upload() {
+    todo!()
+}
+async fn persist_script_upload() {
+    todo!()
+}
+async fn temp_script_upload() {
+    todo!()
+}
+async fn root_handler() {
+    todo!()
+}
+
+async fn controller() -> anyhow::Result<()> {
+    let mut tcp_stream = TcpStream::connect("192.168.178.30:3123").await?;
+    let mut client_is_receiving = false;
+    let mut receive_buffer = [0_u8; 1];
+    let mut poll_ticker = tokio::time::interval(Duration::from_millis(1000));
+    loop {
+        if client_is_receiving {
+            let next_frame = PLAYBACK_STREAM
+                .lock()
+                .await
+                .as_deref_mut()
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            tcp_stream.write_all(&next_frame.0).await?;
+        } else {
+            poll_ticker.tick().await;
+        }
+
+        if let Ok(1) = tcp_stream.try_read(&mut receive_buffer) {
+            client_is_receiving = receive_buffer[0] == 0xff;
+        }
+    }
 }
