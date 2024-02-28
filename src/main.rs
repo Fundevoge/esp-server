@@ -280,12 +280,13 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
             let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
             let next_frame = frame_iter.next().await.unwrap();
             tcp_stream.write_all(&next_frame.0).await?;
+            print!(".");
         } else {
             poll_ticker.tick().await;
         }
 
         if let Ok(1) = tcp_stream.try_read(&mut receive_buffer) {
-            println!("[ESP] Sent: {}", receive_buffer[0]);
+            println!("\n[ESP] Sent: {}", receive_buffer[0]);
             client_is_receiving = receive_buffer[0] == 0xff;
             if client_is_receiving {
                 let fps = PLAYBACK_STREAM.lock().await.as_ref().unwrap().fps();
