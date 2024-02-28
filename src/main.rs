@@ -1,4 +1,10 @@
-use std::{collections::HashMap, ops::DerefMut, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+    ops::DerefMut,
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::Context;
 use axum::{
@@ -293,6 +299,7 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
             }
         } else {
             println!("Polled but no data");
+            io::stdout().flush()?;
         }
     }
 }
