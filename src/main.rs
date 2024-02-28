@@ -280,7 +280,6 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
             let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
             let next_frame = frame_iter.next().await.unwrap();
             tcp_stream.write_all(&next_frame.0).await?;
-            print!(".");
         } else {
             poll_ticker.tick().await;
         }
