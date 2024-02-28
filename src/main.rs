@@ -47,6 +47,7 @@ pub trait AsyncIterator {
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct VideoMetadata {
+    #[serde(rename = "FPS")]
     fps: f32,
 }
 
