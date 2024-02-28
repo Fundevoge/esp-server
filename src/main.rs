@@ -105,13 +105,14 @@ impl AsyncIterator for VideoFrameIterator {
     type Item = DisplayFrame;
 
     async fn next(&mut self) -> Option<DisplayFrame> {
-        self.ticker.tick().await;
-        (self.offset + 256 <= self.buffer.len()).then(|| {
+        let next = (self.offset + 256 <= self.buffer.len()).then(|| {
             self.offset += 256;
             DisplayFrame(
                 <[u8; 256]>::try_from(&self.buffer[self.offset - 256..self.offset]).unwrap(),
             )
-        })
+        });
+        self.ticker.tick().await;
+        next
     }
 }
 
@@ -248,6 +249,7 @@ async fn ping_handler() -> &'static str {
 
 async fn controller() -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind("192.168.178.30:3123").await?;
+
     while let Ok((stream, _)) = tcp_listener.accept().await {
         if let Err(e) = tokio::spawn(handle_esp_client(stream)).await {
             println!("[ESP] Connection ended with error: {e}");
@@ -257,24 +259,21 @@ async fn controller() -> anyhow::Result<()> {
 }
 
 async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+    tcp_stream.set_nodelay(true)?;
     let mut client_is_receiving = false;
     let mut receive_buffer = [0_u8; 1];
     let mut poll_ticker = tokio::time::interval(Duration::from_millis(1000));
     loop {
         if client_is_receiving {
-            println!("Waiting for frame...");
             let mut playback_stream_lock = PLAYBACK_STREAM.lock().await;
-            println!("Locked Playback stream...");
             let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
             let next_frame = frame_iter.next().await.unwrap();
-            println!("Sending frame: {next_frame:?}");
             tcp_stream.write_all(&next_frame.0).await?;
         } else {
             poll_ticker.tick().await;
         }
 
         if let Ok(1) = tcp_stream.try_read(&mut receive_buffer) {
-            println!("Got message from esp: {:02x}", receive_buffer[0]);
             client_is_receiving = receive_buffer[0] == 0xff;
         }
     }
