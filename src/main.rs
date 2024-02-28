@@ -294,7 +294,7 @@ fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> 
             let mut playback_stream_lock = rt.block_on(PLAYBACK_STREAM.lock());
             let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
             let next_frame = rt.block_on(frame_iter.next()).unwrap();
-            tcp_stream.write_all(&next_frame.0)?;
+            tcp_stream.write_all(&next_frame.0).unwrap();
         } else {
             thread::sleep(Duration::from_millis(50));
         }
@@ -308,7 +308,7 @@ fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> 
                     let fps = rt.block_on(PLAYBACK_STREAM.lock()).as_ref().unwrap().fps();
                     let mut temp_buf = [0_u8; 4];
                     byteorder::LE::write_f32(&mut temp_buf, fps);
-                    tcp_stream.write_all(&temp_buf)?;
+                    tcp_stream.write_all(&temp_buf).unwrap();
                 }
             }
             Err(e) => match e.kind() {
