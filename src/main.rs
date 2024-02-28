@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::TcpListener,
     sync::{Mutex, RwLock, RwLockWriteGuard},
     time::{self, Interval},
 };
@@ -245,7 +245,16 @@ async fn ping_handler() -> &'static str {
 }
 
 async fn controller() -> anyhow::Result<()> {
-    let mut tcp_stream = TcpStream::connect("192.168.178.30:3123").await?;
+    let tcp_listener = TcpListener::bind("192.168.178.30:3123").await?;
+    while let Ok((stream, _)) = tcp_listener.accept().await {
+        if let Err(e) = tokio::spawn(handle_esp_client(stream)).await {
+            println!("[ESP] Connection ended with error: {e}");
+        }
+    }
+    Ok(())
+}
+
+async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let mut client_is_receiving = false;
     let mut receive_buffer = [0_u8; 1];
     let mut poll_ticker = tokio::time::interval(Duration::from_millis(1000));
