@@ -284,6 +284,7 @@ fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> 
     let mut receive_buffer = [0_u8; 1];
 
     loop {
+        println!("Looping...");
         if client_is_receiving {
             let mut playback_stream_lock = rt.block_on(PLAYBACK_STREAM.lock());
             let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
