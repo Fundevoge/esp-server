@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     io::{self, ErrorKind, Read, Write},
-    net::{TcpListener, TcpStream},
     ops::DerefMut,
     path::PathBuf,
     thread,
@@ -22,8 +21,8 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
-    io::AsyncReadExt,
-    net::TcpSocket,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::{Mutex, RwLock, RwLockWriteGuard},
     time::{self, Interval},
 };
@@ -161,51 +160,6 @@ fn initialize_file_map(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    initialize_file_map(
-        VIDEOS_DIR,
-        ".bin",
-        VIDEO_FILE_NAMES.write().await,
-        VIDEO_FILE_IDS.write().await,
-    )?;
-    initialize_file_map(
-        VIDEOS_META_DIR,
-        ".json",
-        VIDEO_META_FILE_NAMES.write().await,
-        VIDEO_META_FILE_IDS.write().await,
-    )?;
-    initialize_file_map(
-        SCRIPTS_DIR,
-        ".js",
-        SCRIPT_FILE_NAMES.write().await,
-        SCRIPT_FILE_IDS.write().await,
-    )?;
-
-    let mut playback_stream = PLAYBACK_STREAM.lock().await;
-    playback_stream.deref_mut().replace(Box::new(
-        VideoFrameIterator::from_file_name("Bad Apple")
-            .await
-            .unwrap(),
-    ));
-    drop(playback_stream);
-
-    let app_router = Router::new()
-        .route("/", get(root_handler))
-        .route("/api/persist_video_upload", post(persist_video_upload))
-        .route("/api/temp_video_upload", post(temp_video_upload))
-        .route("/api/persist_script_upload", post(persist_script_upload))
-        .route("/api/temp_script_upload", post(temp_script_upload))
-        .route("/api/ping", get(ping_handler));
-
-    let http_listener = tokio::net::TcpListener::bind("192.168.178.30:3122").await?;
-    thread::spawn(controller);
-    axum::serve(http_listener, app_router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("error running HTTP server")
-}
-
 struct AppError(anyhow::Error);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
@@ -267,33 +221,101 @@ async fn ping_handler() -> &'static str {
     "hello"
 }
 
-fn controller() -> anyhow::Result<()> {
-    let tcp_listener = TcpListener::bind("192.168.178.30:3123")?;
+async fn esp_stream_controller() -> anyhow::Result<()> {
+    let tcp_listener = TcpListener::bind("192.168.178.30:3123").await?;
 
-    while let Ok((stream, _)) = tcp_listener.accept() {
+    loop {
+        let (stream, _) = tcp_listener.accept().await?;
         println!("Handling stream...");
-        if let Err(e) = handle_esp_client(stream) {
+        if let Err(e) = handle_esp_stream_connection(stream).await {
             println!("[ESP] Connection ended with error: {e}");
         }
     }
-    Ok(())
 }
 
-fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
+async fn handle_esp_stream_connection(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
     tcp_stream.set_nodelay(true)?;
 
     {
-        let fps = rt.block_on(PLAYBACK_STREAM.lock()).as_ref().unwrap().fps();
-        let mut temp_buf = [0_u8; 4];
-        byteorder::LE::write_f32(&mut temp_buf, fps);
-        tcp_stream.write_all(&temp_buf)?;
+        let fps = PLAYBACK_STREAM.lock().await.as_ref().unwrap().fps();
+        tcp_stream.write_f32_le(fps).await?;
     }
 
     loop {
-        let mut playback_stream_lock = rt.block_on(PLAYBACK_STREAM.lock());
-        let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
-        let next_frame = rt.block_on(frame_iter.next()).unwrap();
-        tcp_stream.write_all(&next_frame.0)?;
+        let mut playback_stream = PLAYBACK_STREAM.lock().await;
+        let next_frame = playback_stream
+            .as_deref_mut()
+            .unwrap()
+            .next()
+            .await
+            .unwrap();
+        drop(playback_stream);
+        tcp_stream.write_all(&next_frame.0).await?;
     }
+}
+
+async fn esp_state_controller() -> anyhow::Result<()> {
+    let tcp_listener = TcpListener::bind("192.168.178.30:3124").await?;
+
+    loop {
+        let (stream, _) = tcp_listener.accept().await?;
+        println!("Handling state...");
+        if let Err(e) = handle_esp_state_connection(stream).await {
+            println!("[ESP] Connection ended with error: {e}");
+        }
+    }
+}
+
+async fn handle_esp_state_connection(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
+    tcp_stream.set_nodelay(true)?;
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    initialize_file_map(
+        VIDEOS_DIR,
+        ".bin",
+        VIDEO_FILE_NAMES.write().await,
+        VIDEO_FILE_IDS.write().await,
+    )?;
+    initialize_file_map(
+        VIDEOS_META_DIR,
+        ".json",
+        VIDEO_META_FILE_NAMES.write().await,
+        VIDEO_META_FILE_IDS.write().await,
+    )?;
+    initialize_file_map(
+        SCRIPTS_DIR,
+        ".js",
+        SCRIPT_FILE_NAMES.write().await,
+        SCRIPT_FILE_IDS.write().await,
+    )?;
+
+    let mut playback_stream = PLAYBACK_STREAM.lock().await;
+    playback_stream.deref_mut().replace(Box::new(
+        VideoFrameIterator::from_file_name("Bad Apple")
+            .await
+            .unwrap(),
+    ));
+    drop(playback_stream);
+
+    tokio::spawn(esp_stream_controller());
+    tokio::spawn(esp_state_controller());
+
+    let http_listener = tokio::net::TcpListener::bind("192.168.178.30:3122").await?;
+    let app_router = Router::new()
+        .route("/", get(root_handler))
+        .route("/api/persist_video_upload", post(persist_video_upload))
+        .route("/api/temp_video_upload", post(temp_video_upload))
+        .route("/api/persist_script_upload", post(persist_script_upload))
+        .route("/api/temp_script_upload", post(temp_script_upload))
+        .route("/api/ping", get(ping_handler));
+    axum::serve(http_listener, app_router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("error running HTTP server")
 }
