@@ -292,14 +292,12 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
 
         if let Ok(1) = tcp_stream.try_read(&mut receive_buffer) {
             println!("\n[ESP] Sent: {}", receive_buffer[0]);
+            io::stdout().flush()?;
             client_is_receiving = receive_buffer[0] == 0xff;
             if client_is_receiving {
                 let fps = PLAYBACK_STREAM.lock().await.as_ref().unwrap().fps();
                 tcp_stream.write_f32_le(fps).await?;
             }
-        } else {
-            println!("Polled but no data");
-            io::stdout().flush()?;
         }
     }
 }
