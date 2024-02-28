@@ -268,9 +268,12 @@ async fn ping_handler() -> &'static str {
 
 fn controller() -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind("192.168.178.30:3123")?;
+    println!("Setting listener nonblocking...");
     tcp_listener.set_nonblocking(true)?;
+    println!("Set listener nonblocking...");
 
     while let Ok((stream, _)) = tcp_listener.accept() {
+        println!("Handling stream...");
         if let Err(e) = handle_esp_client(stream) {
             println!("[ESP] Connection ended with error: {e}");
         }
@@ -280,7 +283,7 @@ fn controller() -> anyhow::Result<()> {
 
 fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    println!("Handling stream...");
+    println!("Got stream...");
     tcp_stream.set_nodelay(true)?;
     println!("set no delay...");
     tcp_stream.set_nonblocking(true)?;
