@@ -105,14 +105,17 @@ impl AsyncIterator for VideoFrameIterator {
     type Item = DisplayFrame;
 
     async fn next(&mut self) -> Option<DisplayFrame> {
-        let next = (self.offset + 256 <= self.buffer.len()).then(|| {
-            self.offset += 256;
-            DisplayFrame(
-                <[u8; 256]>::try_from(&self.buffer[self.offset - 256..self.offset]).unwrap(),
-            )
-        });
+        if self.offset + 256 > self.buffer.len() {
+            self.offset = 0;
+        }
+        let next_frame = DisplayFrame(
+            self.buffer[self.offset..self.offset + 256]
+                .try_into()
+                .unwrap(),
+        );
+        self.offset += 256;
         self.ticker.tick().await;
-        next
+        Some(next_frame)
     }
 }
 
