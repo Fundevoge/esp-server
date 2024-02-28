@@ -281,59 +281,19 @@ fn controller() -> anyhow::Result<()> {
 
 fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    println!("Got stream...");
     tcp_stream.set_nodelay(true)?;
-    println!("set no delay...");
-    tcp_stream.set_nonblocking(true)?;
-    println!("set non blocking...");
-    let mut client_is_receiving = false;
-    let mut receive_buffer = [0_u8; 1];
+
+    {
+        let fps = rt.block_on(PLAYBACK_STREAM.lock()).as_ref().unwrap().fps();
+        let mut temp_buf = [0_u8; 4];
+        byteorder::LE::write_f32(&mut temp_buf, fps);
+        tcp_stream.write_all(&temp_buf)?;
+    }
 
     loop {
-        if client_is_receiving {
-            let mut playback_stream_lock = rt.block_on(PLAYBACK_STREAM.lock());
-            let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
-            let next_frame = rt.block_on(frame_iter.next()).unwrap();
-            write_all(&mut tcp_stream, &next_frame.0)?;
-        } else {
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        match tcp_stream.read(&mut receive_buffer) {
-            Ok(1) => {
-                println!("\n[ESP] Sent: {}", receive_buffer[0]);
-                io::stdout().flush()?;
-                client_is_receiving = receive_buffer[0] == 0xff;
-                if client_is_receiving {
-                    let fps = rt.block_on(PLAYBACK_STREAM.lock()).as_ref().unwrap().fps();
-                    let mut temp_buf = [0_u8; 4];
-                    byteorder::LE::write_f32(&mut temp_buf, fps);
-                    write_all(&mut tcp_stream, &temp_buf)?;
-                }
-            }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
-            Err(e) => bail!("Error reading from tcp socket: {e}"),
-            Ok(n) => bail!("Error reading from tcp socket, wrong number of bytes: {n}"),
-        }
+        let mut playback_stream_lock = rt.block_on(PLAYBACK_STREAM.lock());
+        let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
+        let next_frame = rt.block_on(frame_iter.next()).unwrap();
+        tcp_stream.write_all(&next_frame.0)?;
     }
-}
-
-fn write_all(tcp_stream: &mut TcpStream, bytes: &[u8]) -> anyhow::Result<()> {
-    let mut offset = 0;
-    while offset < bytes.len() {
-        match tcp_stream.write(&bytes[offset..]) {
-            Ok(0) => bail!("TcpStream invalid"),
-            Ok(n) => {
-                offset += n;
-            }
-            Err(e) => match e.kind() {
-                ErrorKind::WouldBlock => {}
-                _ => {
-                    println!("Error writing to tcp socket: {e}");
-                    return Err(e.into());
-                }
-            },
-        }
-    }
-    Ok(())
 }
