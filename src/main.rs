@@ -268,9 +268,6 @@ async fn ping_handler() -> &'static str {
 
 fn controller() -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind("192.168.178.30:3123")?;
-    println!("Setting listener nonblocking...");
-    tcp_listener.set_nonblocking(true)?;
-    println!("Set listener nonblocking...");
 
     while let Ok((stream, _)) = tcp_listener.accept() {
         println!("Handling stream...");
