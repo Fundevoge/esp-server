@@ -167,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .unwrap(),
     ));
+    drop(playback_stream);
 
     let app_router = Router::new()
         .route("/", get(root_handler))
@@ -261,14 +262,11 @@ async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Res
     let mut poll_ticker = tokio::time::interval(Duration::from_millis(1000));
     loop {
         if client_is_receiving {
-            let next_frame = PLAYBACK_STREAM
-                .lock()
-                .await
-                .as_deref_mut()
-                .unwrap()
-                .next()
-                .await
-                .unwrap();
+            println!("Waiting for frame...");
+            let mut playback_stream_lock = PLAYBACK_STREAM.lock().await;
+            println!("Locked Playback stream...");
+            let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
+            let next_frame = frame_iter.next().await.unwrap();
             println!("Sending frame: {next_frame:?}");
             tcp_stream.write_all(&next_frame.0).await?;
         } else {
