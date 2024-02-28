@@ -311,13 +311,9 @@ fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> 
                     write_all(&mut tcp_stream, &temp_buf)?;
                 }
             }
-            Err(e) => match e.kind() {
-                ErrorKind::WouldBlock => {}
-                _ => {
-                    println!("Error reading from tcp socket: {e}");
-                }
-            },
-            _ => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+            Err(e) => bail!("Error reading from tcp socket: {e}"),
+            Ok(n) => bail!("Error reading from tcp socket, wrong number of bytes: {n}"),
         }
     }
 }
