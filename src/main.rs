@@ -172,7 +172,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/persist_video_upload", post(persist_video_upload))
         .route("/api/temp_video_upload", post(temp_video_upload))
         .route("/api/persist_script_upload", post(persist_script_upload))
-        .route("/api/temp_script_upload", post(temp_script_upload));
+        .route("/api/temp_script_upload", post(temp_script_upload))
+        .route("/api/ping", get(ping_handler));
 
     let http_listener = tokio::net::TcpListener::bind("192.168.178.30:3122").await?;
     tokio::spawn(controller());
@@ -237,6 +238,10 @@ async fn temp_script_upload() {
 }
 async fn root_handler() {
     todo!()
+}
+
+async fn ping_handler() -> &'static str {
+    "hello"
 }
 
 async fn controller() -> anyhow::Result<()> {
