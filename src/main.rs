@@ -1,8 +1,10 @@
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io::{self, ErrorKind, Read, Write},
+    net::TcpListener,
     ops::DerefMut,
     path::PathBuf,
+    thread,
     time::Duration,
 };
 
@@ -15,12 +17,12 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use byteorder::ByteOrder;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    io::AsyncReadExt,
     sync::{Mutex, RwLock, RwLockWriteGuard},
     time::{self, Interval},
 };
@@ -196,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/ping", get(ping_handler));
 
     let http_listener = tokio::net::TcpListener::bind("192.168.178.30:3122").await?;
-    tokio::spawn(controller());
+    thread::spawn(controller);
     axum::serve(http_listener, app_router)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -264,40 +266,52 @@ async fn ping_handler() -> &'static str {
     "hello"
 }
 
-async fn controller() -> anyhow::Result<()> {
-    let tcp_listener = TcpListener::bind("192.168.178.30:3123").await?;
+fn controller() -> anyhow::Result<()> {
+    let tcp_listener = TcpListener::bind("192.168.178.30:3123")?;
 
-    while let Ok((stream, _)) = tcp_listener.accept().await {
-        if let Err(e) = tokio::spawn(handle_esp_client(stream)).await {
+    while let Ok((stream, _)) = tcp_listener.accept() {
+        if let Err(e) = handle_esp_client(stream) {
             println!("[ESP] Connection ended with error: {e}");
         }
     }
     Ok(())
 }
 
-async fn handle_esp_client(mut tcp_stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
     tcp_stream.set_nodelay(true)?;
     let mut client_is_receiving = false;
     let mut receive_buffer = [0_u8; 1];
-    let mut poll_ticker = tokio::time::interval(Duration::from_millis(50));
+
     loop {
         if client_is_receiving {
-            let mut playback_stream_lock = PLAYBACK_STREAM.lock().await;
+            let mut playback_stream_lock = rt.block_on(PLAYBACK_STREAM.lock());
             let frame_iter = playback_stream_lock.as_deref_mut().unwrap();
-            let next_frame = frame_iter.next().await.unwrap();
-            tcp_stream.write_all(&next_frame.0).await?;
+            let next_frame = rt.block_on(frame_iter.next()).unwrap();
+            tcp_stream.write_all(&next_frame.0)?;
         } else {
-            poll_ticker.tick().await;
+            thread::sleep(Duration::from_millis(50));
         }
 
-        if let Ok(1) = tcp_stream.try_read(&mut receive_buffer) {
-            println!("\n[ESP] Sent: {}", receive_buffer[0]);
-            io::stdout().flush()?;
-            client_is_receiving = receive_buffer[0] == 0xff;
-            if client_is_receiving {
-                let fps = PLAYBACK_STREAM.lock().await.as_ref().unwrap().fps();
-                tcp_stream.write_f32_le(fps).await?;
+        match tcp_stream.read(&mut receive_buffer) {
+            Ok(1) => {
+                println!("\n[ESP] Sent: {}", receive_buffer[0]);
+                io::stdout().flush()?;
+                client_is_receiving = receive_buffer[0] == 0xff;
+                if client_is_receiving {
+                    let fps = rt.block_on(PLAYBACK_STREAM.lock()).as_ref().unwrap().fps();
+                    let mut temp_buf = [0_u8; 4];
+                    byteorder::LE::write_f32(&mut temp_buf, fps);
+                    tcp_stream.write_all(&temp_buf)?;
+                }
             }
+            Err(e) => match e.kind() {
+                ErrorKind::WouldBlock => {}
+                _ => {
+                    println!("Error reading from tcp socket: {e}");
+                }
+            },
+            _ => {}
         }
     }
 }
