@@ -280,8 +280,11 @@ fn controller() -> anyhow::Result<()> {
 
 fn handle_esp_client(mut tcp_stream: std::net::TcpStream) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
+    println!("Handling stream...");
     tcp_stream.set_nodelay(true)?;
+    println!("set no delay...");
     tcp_stream.set_nonblocking(true)?;
+    println!("set non blocking...");
     let mut client_is_receiving = false;
     let mut receive_buffer = [0_u8; 1];
 
