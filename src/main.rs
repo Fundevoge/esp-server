@@ -3,6 +3,7 @@ use std::{
     io::{self, ErrorKind, Read, Write},
     ops::DerefMut,
     path::PathBuf,
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -23,7 +24,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpSocket, TcpStream},
-    sync::{Mutex, RwLock, RwLockWriteGuard},
+    sync::{mpsc, Mutex, RwLock, RwLockWriteGuard},
     time::{self, Interval},
 };
 
@@ -43,7 +44,7 @@ static SCRIPT_FILE_NAMES: RwLock<Vec<PathBuf>> = RwLock::const_new(Vec::new());
 static SCRIPT_FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> =
     Lazy::new(|| RwLock::const_new(HashMap::new()));
 
-static PLAYBACK_STREAM: Mutex<Option<Box<dyn AsyncIterator<Item = DisplayFrame> + Sync + Send>>> =
+static PLAYBACK_STREAM: Mutex<Option<Box<dyn AsyncIterator<Item = DisplayFrame> + Send>>> =
     Mutex::const_new(None);
 
 #[async_trait]
@@ -201,6 +202,17 @@ async fn shutdown_signal() {
     }
 }
 
+async fn start_stream(
+    stream: Box<dyn AsyncIterator<Item = DisplayFrame> + Send>,
+) -> anyhow::Result<()> {
+    let mut playback_stream = PLAYBACK_STREAM.lock().await;
+    *playback_stream = Some(stream);
+    drop(playback_stream);
+
+    ESP_CONTROL_CHANNEL.0.send(()).await?;
+    Ok(())
+}
+
 async fn persist_video_upload() {
     todo!()
 }
@@ -228,7 +240,7 @@ async fn esp_stream_controller() -> anyhow::Result<()> {
         let (stream, _) = tcp_listener.accept().await?;
         println!("Handling stream...");
         if let Err(e) = handle_esp_stream_connection(stream).await {
-            println!("[ESP] Connection ended with error: {e}");
+            println!("[ESP] Stream Connection ended with error: {e}");
         }
     }
 }
@@ -259,20 +271,30 @@ async fn esp_state_controller() -> anyhow::Result<()> {
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
-        println!("Handling state...");
+        println!("Handling state control...");
         if let Err(e) = handle_esp_state_connection(stream).await {
-            println!("[ESP] Connection ended with error: {e}");
+            println!("[ESP] State Control Connection ended with error: {e}");
         }
     }
 }
 
 async fn handle_esp_state_connection(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
+    let mut receiver = ESP_CONTROL_CHANNEL.1.lock().await;
     tcp_stream.set_nodelay(true)?;
 
     loop {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        receiver
+            .recv()
+            .await
+            .expect("State Control channel closed unexpectedly");
+        tcp_stream.write_u8(0xff).await?;
     }
 }
+
+static ESP_CONTROL_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> = Lazy::new(|| {
+    let (esp_control_sender, esp_control_receiver) = mpsc::channel(256);
+    (esp_control_sender, Mutex::new(esp_control_receiver))
+});
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
