@@ -1,48 +1,16 @@
-use std::{
-    collections::HashMap,
-    io::{self, ErrorKind, Read, Write},
-    ops::DerefMut,
-    path::PathBuf,
-    sync::Arc,
-    thread,
-    time::Duration,
-};
+use std::{ops::DerefMut, time::Duration};
 
-use anyhow::{bail, Context};
-use axum::{
-    async_trait,
-    extract::Query,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Router,
-};
-use byteorder::ByteOrder;
-use once_cell::sync::Lazy;
+use anyhow::Context;
+use axum::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpSocket, TcpStream},
-    sync::{mpsc, Mutex, RwLock, RwLockWriteGuard},
+    sync::Mutex,
     time::{self, Interval},
 };
+use webserver::{get_video_frames, get_video_metadata, init_server};
 
-const VIDEOS_DIR: &str = "videos";
-const VIDEOS_META_DIR: &str = "videos_meta";
-const SCRIPTS_DIR: &str = "scripts";
-
-static VIDEO_FILE_NAMES: RwLock<Vec<PathBuf>> = RwLock::const_new(Vec::new());
-static VIDEO_FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> =
-    Lazy::new(|| RwLock::const_new(HashMap::new()));
-
-static VIDEO_META_FILE_NAMES: RwLock<Vec<PathBuf>> = RwLock::const_new(Vec::new());
-static VIDEO_META_FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> =
-    Lazy::new(|| RwLock::const_new(HashMap::new()));
-
-static SCRIPT_FILE_NAMES: RwLock<Vec<PathBuf>> = RwLock::const_new(Vec::new());
-static SCRIPT_FILE_IDS: Lazy<RwLock<HashMap<String, usize>>> =
-    Lazy::new(|| RwLock::const_new(HashMap::new()));
+mod esp_control;
+mod webserver;
 
 static PLAYBACK_STREAM: Mutex<Option<Box<dyn AsyncIterator<Item = DisplayFrame> + Send>>> =
     Mutex::const_new(None);
@@ -65,34 +33,6 @@ struct VideoFrameIterator {
     buffer: Vec<u8>,
     offset: usize,
     metadata: VideoMetadata,
-}
-
-async fn get_video_metadata(file_name: &str) -> Option<VideoMetadata> {
-    let videos_meta_file_ids = VIDEO_META_FILE_IDS.read().await;
-    let videos_meta_file_names = VIDEO_META_FILE_NAMES.read().await;
-    let video_meta_file_id = *videos_meta_file_ids.get(file_name)?;
-    let video_meta_file_name = videos_meta_file_names.get(video_meta_file_id)?;
-    let mut video_metadata = String::new();
-    let mut file = File::open(video_meta_file_name).await.ok()?;
-    drop(videos_meta_file_ids);
-    drop(videos_meta_file_names);
-
-    file.read_to_string(&mut video_metadata).await.ok()?;
-    serde_json::from_str(&video_metadata).ok()
-}
-
-async fn get_video_frames(file_name: &str) -> Option<Vec<u8>> {
-    let videos_file_ids = VIDEO_FILE_IDS.read().await;
-    let videos_file_names = VIDEO_FILE_NAMES.read().await;
-    let video_file_id = *videos_file_ids.get(file_name)?;
-    let video_file_name = videos_file_names.get(video_file_id)?;
-    let mut video_frames = Vec::new();
-    let mut file = File::open(video_file_name).await.ok()?;
-    drop(videos_file_ids);
-    drop(videos_file_names);
-
-    file.read_to_end(&mut video_frames).await.ok()?;
-    Some(video_frames)
 }
 
 impl VideoFrameIterator {
@@ -136,48 +76,26 @@ impl AsyncIterator for VideoFrameIterator {
     }
 }
 
-fn initialize_file_map(
-    dir: &str,
-    file_extension: &str,
-    mut file_names: RwLockWriteGuard<'_, Vec<PathBuf>>,
-    mut file_ids: RwLockWriteGuard<'_, HashMap<String, usize>>,
-) -> anyhow::Result<()> {
-    for (index, file) in std::fs::read_dir(dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .enumerate()
-    {
-        let file_name = file.file_name().unwrap().to_string_lossy();
-        let Some(file_name_no_extension) = file_name.strip_suffix(file_extension) else {
-            continue;
-        };
-        file_ids.insert(file_name_no_extension.to_string(), index);
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let (http_listener, app_router) = init_server().await?;
 
-        file_names.push(file);
-    }
-    drop(file_names);
-    drop(file_ids);
-    Ok(())
-}
+    let mut playback_stream = PLAYBACK_STREAM.lock().await;
+    playback_stream.deref_mut().replace(Box::new(
+        VideoFrameIterator::from_file_name("Bad Apple")
+            .await
+            .unwrap(),
+    ));
+    drop(playback_stream);
 
-struct AppError(anyhow::Error);
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {}", self.0),
-        )
-            .into_response()
-    }
-}
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
-        Self(err.into())
-    }
+    tokio::spawn(esp_control::esp_stream_controller());
+    tokio::spawn(esp_control::esp_state_controller());
+    tokio::spawn(esp_control::esp_time_controller());
+
+    axum::serve(http_listener, app_router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("error running HTTP server")
 }
 
 async fn shutdown_signal() {
@@ -200,144 +118,4 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-}
-
-async fn start_stream(
-    stream: Box<dyn AsyncIterator<Item = DisplayFrame> + Send>,
-) -> anyhow::Result<()> {
-    let mut playback_stream = PLAYBACK_STREAM.lock().await;
-    *playback_stream = Some(stream);
-    drop(playback_stream);
-
-    ESP_CONTROL_CHANNEL.0.send(()).await?;
-    Ok(())
-}
-
-async fn persist_video_upload() {
-    todo!()
-}
-async fn temp_video_upload() {
-    todo!()
-}
-async fn persist_script_upload() {
-    todo!()
-}
-async fn temp_script_upload() {
-    todo!()
-}
-async fn root_handler() {
-    todo!()
-}
-
-async fn ping_handler() -> &'static str {
-    "hello"
-}
-
-async fn esp_stream_controller() -> anyhow::Result<()> {
-    let tcp_listener = TcpListener::bind("192.168.178.30:3123").await?;
-
-    loop {
-        let (stream, _) = tcp_listener.accept().await?;
-        println!("Handling stream...");
-        if let Err(e) = handle_esp_stream_connection(stream).await {
-            println!("[ESP] Stream Connection ended with error: {e}");
-        }
-    }
-}
-
-async fn handle_esp_stream_connection(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
-    tcp_stream.set_nodelay(true)?;
-
-    {
-        let fps = PLAYBACK_STREAM.lock().await.as_ref().unwrap().fps();
-        tcp_stream.write_f32_le(fps).await?;
-    }
-
-    loop {
-        let mut playback_stream = PLAYBACK_STREAM.lock().await;
-        let next_frame = playback_stream
-            .as_deref_mut()
-            .unwrap()
-            .next()
-            .await
-            .unwrap();
-        drop(playback_stream);
-        tcp_stream.write_all(&next_frame.0).await?;
-    }
-}
-
-async fn esp_state_controller() -> anyhow::Result<()> {
-    let tcp_listener = TcpListener::bind("192.168.178.30:3124").await?;
-
-    loop {
-        let (stream, _) = tcp_listener.accept().await?;
-        println!("Handling state control...");
-        if let Err(e) = handle_esp_state_connection(stream).await {
-            println!("[ESP] State Control Connection ended with error: {e}");
-        }
-    }
-}
-
-async fn handle_esp_state_connection(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
-    let mut receiver = ESP_CONTROL_CHANNEL.1.lock().await;
-    tcp_stream.set_nodelay(true)?;
-
-    loop {
-        receiver
-            .recv()
-            .await
-            .expect("State Control channel closed unexpectedly");
-        tcp_stream.write_u8(0xff).await?;
-    }
-}
-
-static ESP_CONTROL_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> = Lazy::new(|| {
-    let (esp_control_sender, esp_control_receiver) = mpsc::channel(256);
-    (esp_control_sender, Mutex::new(esp_control_receiver))
-});
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    initialize_file_map(
-        VIDEOS_DIR,
-        ".bin",
-        VIDEO_FILE_NAMES.write().await,
-        VIDEO_FILE_IDS.write().await,
-    )?;
-    initialize_file_map(
-        VIDEOS_META_DIR,
-        ".json",
-        VIDEO_META_FILE_NAMES.write().await,
-        VIDEO_META_FILE_IDS.write().await,
-    )?;
-    initialize_file_map(
-        SCRIPTS_DIR,
-        ".js",
-        SCRIPT_FILE_NAMES.write().await,
-        SCRIPT_FILE_IDS.write().await,
-    )?;
-
-    let mut playback_stream = PLAYBACK_STREAM.lock().await;
-    playback_stream.deref_mut().replace(Box::new(
-        VideoFrameIterator::from_file_name("Bad Apple")
-            .await
-            .unwrap(),
-    ));
-    drop(playback_stream);
-
-    tokio::spawn(esp_stream_controller());
-    tokio::spawn(esp_state_controller());
-
-    let http_listener = tokio::net::TcpListener::bind("192.168.178.30:3122").await?;
-    let app_router = Router::new()
-        .route("/", get(root_handler))
-        .route("/api/persist_video_upload", post(persist_video_upload))
-        .route("/api/temp_video_upload", post(temp_video_upload))
-        .route("/api/persist_script_upload", post(persist_script_upload))
-        .route("/api/temp_script_upload", post(temp_script_upload))
-        .route("/api/ping", get(ping_handler));
-    axum::serve(http_listener, app_router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("error running HTTP server")
 }
