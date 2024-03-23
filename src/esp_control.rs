@@ -5,6 +5,7 @@ use tokio::{
     io::AsyncWriteExt as _,
     net::{TcpListener, TcpStream},
     sync::{mpsc, Mutex},
+    task::JoinHandle,
     time::sleep,
 };
 
@@ -90,15 +91,24 @@ static ESP_CONTROL_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> 
 
 pub async fn esp_time_controller() -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind("192.168.178.30:3125").await?;
+    let mut last_handle: Option<JoinHandle<anyhow::Result<()>>> = None;
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
         let stream = make_tcp_stream_keepalive(stream)?;
         println!("Handling time control...");
-
-        if let Err(e) = handle_esp_time_connection(stream).await {
-            println!("[ESP] Time Control Connection ended with error: {e}");
+        if let Some(last_task_handle) = last_handle {
+            if last_task_handle.is_finished() {
+                if let Err(e) = last_task_handle.await {
+                    println!("[ESP] Time Control Connection ended with error: {e}");
+                }
+            } else {
+                last_task_handle.abort();
+                println!("[ESP] Time Control Aborted stale connection");
+            }
         }
+
+        last_handle = Some(tokio::spawn(handle_esp_time_connection(stream)));
     }
 }
 
