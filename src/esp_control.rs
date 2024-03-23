@@ -5,7 +5,6 @@ use tokio::{
     io::AsyncWriteExt as _,
     net::{TcpListener, TcpStream},
     sync::{mpsc, Mutex},
-    task::JoinHandle,
     time::sleep,
 };
 
@@ -57,7 +56,6 @@ async fn handle_esp_stream_connection(mut tcp_stream: TcpStream) -> anyhow::Resu
 
 pub async fn esp_state_controller() -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind("192.168.178.30:3124").await?;
-    let mut last_handle: Option<JoinHandle<anyhow::Result<()>>> = None;
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
@@ -65,8 +63,6 @@ pub async fn esp_state_controller() -> anyhow::Result<()> {
         if let Err(e) = handle_esp_state_connection(stream).await {
             println!("[ESP] State Control Connection ended with error: {e}");
         }
-
-        last_handle = Some(tokio::spawn(handle_esp_state_connection(stream)));
     }
 }
 
@@ -90,7 +86,6 @@ static ESP_CONTROL_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> 
 
 pub async fn esp_time_controller() -> anyhow::Result<()> {
     let tcp_listener = TcpListener::bind("192.168.178.30:3125").await?;
-    let mut last_handle: Option<JoinHandle<anyhow::Result<()>>> = None;
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
@@ -98,8 +93,6 @@ pub async fn esp_time_controller() -> anyhow::Result<()> {
         if let Err(e) = handle_esp_time_connection(stream).await {
             println!("[ESP] Time Control Connection ended with error: {e}");
         }
-
-        last_handle = Some(tokio::spawn(handle_esp_time_connection(stream)));
     }
 }
 
