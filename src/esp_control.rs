@@ -26,13 +26,15 @@ pub async fn start_stream(
 }
 
 pub async fn esp_stream_controller() -> anyhow::Result<()> {
+    log::info!("[ESP] STREAM Binding controller...");
     let tcp_listener = TcpListener::bind("192.168.178.30:3123").await?;
+    log::info!("[ESP] STREAM Controller bound!");
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
-        println!("Handling stream...");
+        log::info!("[ESP] STREAM Client connected!");
         if let Err(e) = handle_esp_stream_connection(stream).await {
-            println!("[ESP] Stream Connection ended with error: {e}");
+            log::warn!("[ESP] STREAM Connection ended with error: {e}");
         }
     }
 }
@@ -59,13 +61,15 @@ async fn handle_esp_stream_connection(mut tcp_stream: TcpStream) -> anyhow::Resu
 }
 
 pub async fn esp_state_controller() -> anyhow::Result<()> {
+    log::info!("[ESP] STATE Binding controller...");
     let tcp_listener = TcpListener::bind("192.168.178.30:3124").await?;
+    log::info!("[ESP] STATE Controller bound!");
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
-        println!("Handling state control...");
+        log::info!("[ESP] STATE Client connected!");
         if let Err(e) = handle_esp_state_connection(stream).await {
-            println!("[ESP] State Control Connection ended with error: {e}");
+            log::warn!("[ESP] STATE Connection ended with error: {e}");
         }
     }
 }
@@ -89,13 +93,15 @@ static ESP_CONTROL_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> 
 });
 
 pub async fn esp_time_controller() -> anyhow::Result<()> {
+    log::info!("[ESP] TIME Binding controller...");
     let tcp_listener = TcpListener::bind("192.168.178.30:3125").await?;
+    log::info!("[ESP] TIME Controller bound!");
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
-        println!("Handling time control...");
+        log::info!("[ESP] TIME Client connected!");
         if let Err(e) = handle_esp_time_connection(stream).await {
-            println!("[ESP] Time Control Connection ended with error: {e}");
+            log::warn!("[ESP] TIME Connection ended with error: {e}");
         }
     }
 }
@@ -116,13 +122,15 @@ async fn handle_esp_time_connection(mut tcp_stream: TcpStream) -> anyhow::Result
 }
 
 pub async fn esp_keepalive() -> anyhow::Result<()> {
+    log::info!("[ESP] KEEPALIVE Binding controller...");
     let tcp_listener = TcpListener::bind("192.168.178.30:3122").await?;
+    log::info!("[ESP] KEEPALIVE Controller bound!");
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
-        println!("Handling keepalive...");
+        log::info!("[ESP] KEEPALIVE Client connected!");
         if let Err(e) = handle_esp_keepalive(stream).await {
-            println!("[ESP] Keepalive Connection ended with error: {e}");
+            log::warn!("[ESP] KEEPALIVE Connection ended with error: {e}");
         }
     }
 }
@@ -144,7 +152,7 @@ async fn handle_esp_keepalive(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
         for b in &mut buf {
             *b = 0;
         }
-        println!("[ESP] KEEPALIVE counter={counter}");
+        log::info!("[ESP] KEEPALIVE counter={counter}");
         counter += 1;
     }
 }
@@ -155,7 +163,7 @@ async fn restart_process_on_timeout(mut rx: mpsc::Receiver<()>) {
             .await
             .is_err()
         {
-            println!("[ESP] KEEPALIVE Did not receive value within 15 s, restarting");
+            log::error!("[ESP] KEEPALIVE Did not receive value within 15 s, restarting");
             restart();
         }
     }
@@ -163,7 +171,7 @@ async fn restart_process_on_timeout(mut rx: mpsc::Receiver<()>) {
 
 fn restart() {
     let err = Command::new("/proc/self/exe").exec();
-    eprintln!("Failed to exec: {:?}", err);
+    log::error!("Failed to exec: {:?}", err);
 
     std::process::exit(1);
 }

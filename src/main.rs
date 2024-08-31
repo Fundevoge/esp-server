@@ -78,6 +78,8 @@ impl AsyncIterator for VideoFrameIterator {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let (http_listener, app_router) = init_server().await?;
 
     let mut playback_stream = PLAYBACK_STREAM.lock().await;
