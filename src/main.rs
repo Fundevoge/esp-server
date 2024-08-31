@@ -91,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(esp_control::esp_stream_controller());
     tokio::spawn(esp_control::esp_state_controller());
     tokio::spawn(esp_control::esp_time_controller());
+    tokio::spawn(esp_control::esp_keepalive());
 
     axum::serve(http_listener, app_router)
         .with_graceful_shutdown(shutdown_signal())

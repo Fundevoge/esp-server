@@ -1,8 +1,12 @@
-use std::time::{Duration, SystemTime};
+use std::{
+    os::unix::process::CommandExt,
+    process::Command,
+    time::{Duration, SystemTime},
+};
 
 use once_cell::sync::Lazy;
 use tokio::{
-    io::AsyncWriteExt as _,
+    io::{AsyncReadExt, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
     sync::{mpsc, Mutex},
     time::sleep,
@@ -108,5 +112,44 @@ async fn handle_esp_time_connection(mut tcp_stream: TcpStream) -> anyhow::Result
             )
             .await?;
         sleep(Duration::from_secs(15)).await;
+    }
+}
+
+pub async fn esp_keepalive() -> anyhow::Result<()> {
+    let tcp_listener = TcpListener::bind("192.168.178.30:3122").await?;
+
+    loop {
+        let (stream, _) = tcp_listener.accept().await?;
+        println!("Handling keepalive...");
+        if let Err(e) = handle_esp_keepalive(stream).await {
+            println!("[ESP] Keepalive Connection ended with error: {e}");
+        }
+    }
+}
+
+async fn handle_esp_keepalive(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
+    tcp_stream.set_nodelay(true)?;
+    let mut buf = [0_u8; 256];
+    let (tx, rx) = mpsc::channel::<()>(8);
+    tokio::task::spawn(restart_process_on_timeout(rx));
+
+    loop {
+        tcp_stream.read_exact(&mut buf).await?;
+        tx.send(()).await?;
+    }
+}
+
+async fn restart_process_on_timeout(mut rx: mpsc::Receiver<()>) {
+    loop {
+        if tokio::time::timeout(Duration::from_secs(15), rx.recv())
+            .await
+            .is_err()
+        {
+            println!("[ESP] KEEPALIVE Did not receive value within 15 s, restarting");
+            let err = Command::new("/proc/self/exe").exec();
+            eprintln!("Failed to exec: {:?}", err);
+
+            std::process::exit(1);
+        }
     }
 }
