@@ -123,7 +123,7 @@ async fn handle_esp_time_connection(mut tcp_stream: TcpStream) -> anyhow::Result
 
 pub async fn esp_keepalive() -> anyhow::Result<()> {
     log::info!("[ESP] KEEPALIVE Binding controller...");
-    let tcp_listener = TcpListener::bind("192.168.178.30:3122").await?;
+    let tcp_listener = TcpListener::bind("192.168.178.30:3126").await?;
     log::info!("[ESP] KEEPALIVE Controller bound!");
 
     loop {
