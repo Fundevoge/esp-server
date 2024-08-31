@@ -78,7 +78,10 @@ impl AsyncIterator for VideoFrameIterator {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::Builder::default()
+        .filter_level(log::LevelFilter::Info)
+        .target(env_logger::Target::Stdout)
+        .init();
 
     let (http_listener, app_router) = init_server().await?;
 
