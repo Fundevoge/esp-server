@@ -1,11 +1,11 @@
-use std::{ops::DerefMut, time::Duration};
+use std::{future::IntoFuture, ops::DerefMut, time::Duration};
 
-use anyhow::Context;
 use axum::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::Mutex,
     time::{self, Interval},
+    try_join,
 };
 use webserver::{get_video_frames, get_video_metadata, init_server};
 
@@ -88,15 +88,30 @@ async fn main() -> anyhow::Result<()> {
     ));
     drop(playback_stream);
 
-    tokio::spawn(esp_control::esp_stream_controller());
-    tokio::spawn(esp_control::esp_state_controller());
-    tokio::spawn(esp_control::esp_time_controller());
-    tokio::spawn(esp_control::esp_keepalive());
+    let handle_stream = tokio::spawn(esp_control::esp_stream_controller());
+    let handle_state = tokio::spawn(esp_control::esp_state_controller());
+    let handle_time = tokio::spawn(esp_control::esp_time_controller());
+    let handle_keepalive = tokio::spawn(esp_control::esp_keepalive());
 
-    axum::serve(http_listener, app_router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("error running HTTP server")
+    let handle_webserver = tokio::spawn(
+        axum::serve(http_listener, app_router)
+            .with_graceful_shutdown(shutdown_signal())
+            .into_future(),
+    );
+    let (stream_err, state_err, time_err, keepalive_err, webserver_err) = try_join!(
+        handle_keepalive,
+        handle_state,
+        handle_stream,
+        handle_time,
+        handle_webserver
+    )?;
+    stream_err?;
+    state_err?;
+    time_err?;
+    keepalive_err?;
+    webserver_err?;
+
+    Ok(())
 }
 
 async fn shutdown_signal() {
