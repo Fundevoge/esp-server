@@ -135,6 +135,12 @@ async fn handle_esp_keepalive(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
 
     loop {
         tcp_stream.read_exact(&mut buf).await?;
+        if buf.iter().any(|b| *b != 0b01010110) {
+            restart();
+        }
+        for b in &mut buf {
+            *b = 0;
+        }
         tx.send(()).await?;
     }
 }
@@ -146,10 +152,14 @@ async fn restart_process_on_timeout(mut rx: mpsc::Receiver<()>) {
             .is_err()
         {
             println!("[ESP] KEEPALIVE Did not receive value within 15 s, restarting");
-            let err = Command::new("/proc/self/exe").exec();
-            eprintln!("Failed to exec: {:?}", err);
-
-            std::process::exit(1);
+            restart();
         }
     }
+}
+
+fn restart() {
+    let err = Command::new("/proc/self/exe").exec();
+    eprintln!("Failed to exec: {:?}", err);
+
+    std::process::exit(1);
 }
