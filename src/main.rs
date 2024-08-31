@@ -116,7 +116,13 @@ async fn shutdown_signal() {
     };
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        _ = ctrl_c => {
+            println!("Received Ctrl-C");
+            std::process::exit(1);
+        },
+        _ = terminate => {
+            println!("Received Terminate");
+            std::process::exit(1);
+        },
     }
 }

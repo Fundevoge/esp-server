@@ -132,16 +132,20 @@ async fn handle_esp_keepalive(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
     let mut buf = [0_u8; 256];
     let (tx, rx) = mpsc::channel::<()>(8);
     tokio::task::spawn(restart_process_on_timeout(rx));
+    let mut counter = 0;
 
     loop {
         tcp_stream.read_exact(&mut buf).await?;
         if buf.iter().any(|b| *b != 0b01010110) {
             restart();
         }
+        tx.send(()).await?;
+
         for b in &mut buf {
             *b = 0;
         }
-        tx.send(()).await?;
+        println!("[ESP] KEEPALIVE counter={counter}");
+        counter += 1;
     }
 }
 
