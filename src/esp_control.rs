@@ -152,7 +152,7 @@ async fn handle_esp_keepalive(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
         for b in &mut buf {
             *b = 0;
         }
-        log::info!("[ESP] KEEPALIVE counter={counter}");
+        log::trace!("[ESP] KEEPALIVE counter={counter}");
         counter += 1;
     }
 }
