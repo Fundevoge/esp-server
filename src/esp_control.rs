@@ -181,10 +181,12 @@ async fn esp_main_receiver(mut socket_rx: OwnedReadHalf) -> anyhow::Result<()> {
 
 async fn esp_main_sender(mut tx: OwnedWriteHalf) -> anyhow::Result<()> {
     let mut packet_receiver = ESP_PACKET_CHANNEL.1.lock().await;
+    log::info!("[ESP] Ready to send packets");
     loop {
         let packet = packet_receiver.recv().await.context("Receiving failed")?;
         tx.write_all(&packet).await?;
         tx.flush().await?;
+        log::info!("[ESP] Sent packet");
     }
 }
 
