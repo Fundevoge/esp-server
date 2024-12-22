@@ -19,23 +19,29 @@ use tokio::{
 use crate::{AsyncIterator, DisplayFrame, PLAYBACK_STREAM};
 
 const PACKET_FILLER: u8 = 0b01010110;
+const SEND_PACKET_SIZE: usize = 64;
 
 enum OutgoingPacketType {
-    TimeSet,
+    TimeSync,
+    TimeFollowUp,
+    TimeDelayResp,
     StateChange,
 }
 
 impl From<OutgoingPacketType> for u8 {
     fn from(val: OutgoingPacketType) -> Self {
         match val {
-            OutgoingPacketType::TimeSet => 0,
-            OutgoingPacketType::StateChange => 1,
+            OutgoingPacketType::TimeSync => 0,
+            OutgoingPacketType::TimeFollowUp => 1,
+            OutgoingPacketType::TimeDelayResp => 2,
+            OutgoingPacketType::StateChange => 3,
         }
     }
 }
 
 enum IncomingPacketType {
     Keepalive,
+    TimeDelayReq,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -82,6 +88,7 @@ impl TryFrom<u8> for IncomingPacketType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(IncomingPacketType::Keepalive),
+            1 => Ok(IncomingPacketType::TimeDelayReq),
             _ => Err(()),
         }
     }
@@ -94,7 +101,7 @@ pub async fn start_stream(
     *playback_stream = Some(stream);
     drop(playback_stream);
 
-    let mut packet = [PACKET_FILLER; 256];
+    let mut packet = [PACKET_FILLER; SEND_PACKET_SIZE];
     packet[0] = OutgoingPacketType::StateChange.into();
     packet[1] = State::Stream.into();
 
@@ -171,11 +178,14 @@ async fn esp_main_receiver(mut socket_rx: OwnedReadHalf) -> anyhow::Result<()> {
 
     loop {
         socket_rx.read_exact(&mut buf).await?;
-        let Ok(IncomingPacketType::Keepalive) = IncomingPacketType::try_from(buf[0]) else {
+        let Ok(packet_type) = IncomingPacketType::try_from(buf[0]) else {
             log::warn!("[ESP] Invalid incoming packet");
             continue;
         };
         tx.send(()).await?;
+        if let IncomingPacketType::TimeDelayReq = packet_type {
+            ESP_TIME_CHANNEL.0.send(()).await?;
+        }
     }
 }
 
@@ -199,18 +209,39 @@ fn write_naive_datetime(transmit_buffer: &mut [u8], date_time: DateTime<Utc>) {
 }
 
 async fn time_control() -> anyhow::Result<()> {
+    let mut time_request_receiver = ESP_TIME_CHANNEL.1.lock().await;
+
     loop {
-        let mut packet = [PACKET_FILLER; 256];
-        packet[0] = OutgoingPacketType::TimeSet.into();
-        write_naive_datetime(&mut packet[1..], Utc::now());
+        let mut packet = [PACKET_FILLER; SEND_PACKET_SIZE];
+        packet[0] = OutgoingPacketType::TimeSync.into();
+        let sent_sync = Utc::now();
+        ESP_PACKET_CHANNEL.0.send(packet).await?;
+        sleep(Duration::from_millis(100)).await;
+
+        let mut packet = [PACKET_FILLER; SEND_PACKET_SIZE];
+        packet[0] = OutgoingPacketType::TimeFollowUp.into();
+        write_naive_datetime(&mut packet[1..], sent_sync);
         ESP_PACKET_CHANNEL.0.send(packet).await?;
 
-        sleep(Duration::from_secs(15)).await;
+        time_request_receiver.recv().await;
+        let received_delay_request = Utc::now();
+
+        let mut packet = [PACKET_FILLER; SEND_PACKET_SIZE];
+        packet[0] = OutgoingPacketType::TimeDelayResp.into();
+        write_naive_datetime(&mut packet[1..], received_delay_request);
+        ESP_PACKET_CHANNEL.0.send(packet).await?;
+
+        sleep(Duration::from_secs(60)).await;
     }
 }
 
-type P = [u8; 256];
+type P = [u8; SEND_PACKET_SIZE];
 static ESP_PACKET_CHANNEL: Lazy<(mpsc::Sender<P>, Mutex<mpsc::Receiver<P>>)> = Lazy::new(|| {
+    let (esp_control_sender, esp_control_receiver) = mpsc::channel(256);
+    (esp_control_sender, Mutex::new(esp_control_receiver))
+});
+
+static ESP_TIME_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> = Lazy::new(|| {
     let (esp_control_sender, esp_control_receiver) = mpsc::channel(256);
     (esp_control_sender, Mutex::new(esp_control_receiver))
 });
