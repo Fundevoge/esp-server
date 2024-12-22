@@ -165,7 +165,7 @@ async fn handle_esp_main_connection(tcp_stream: TcpStream) -> anyhow::Result<()>
 }
 
 async fn esp_main_receiver(mut socket_rx: OwnedReadHalf) -> anyhow::Result<()> {
-    let mut buf = [0_u8; 64];
+    let mut buf = [0_u8; 256];
     let (tx, rx) = mpsc::channel::<()>(8);
     tokio::task::spawn(restart_process_on_timeout(rx));
 
