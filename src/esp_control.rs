@@ -94,7 +94,7 @@ pub async fn start_stream(
     *playback_stream = Some(stream);
     drop(playback_stream);
 
-    let mut packet = [PACKET_FILLER; 16];
+    let mut packet = [PACKET_FILLER; 256];
     packet[0] = OutgoingPacketType::StateChange.into();
     packet[1] = State::Stream.into();
 
@@ -198,7 +198,7 @@ fn write_naive_datetime(transmit_buffer: &mut [u8], date_time: DateTime<Utc>) {
 
 async fn time_control() -> anyhow::Result<()> {
     loop {
-        let mut packet = [PACKET_FILLER; 16];
+        let mut packet = [PACKET_FILLER; 256];
         packet[0] = OutgoingPacketType::TimeSet.into();
         write_naive_datetime(&mut packet[1..], Utc::now());
 
@@ -206,7 +206,7 @@ async fn time_control() -> anyhow::Result<()> {
     }
 }
 
-type P = [u8; 16];
+type P = [u8; 256];
 static ESP_PACKET_CHANNEL: Lazy<(mpsc::Sender<P>, Mutex<mpsc::Receiver<P>>)> = Lazy::new(|| {
     let (esp_control_sender, esp_control_receiver) = mpsc::channel(256);
     (esp_control_sender, Mutex::new(esp_control_receiver))
