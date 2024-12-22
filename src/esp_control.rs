@@ -180,9 +180,9 @@ async fn esp_main_receiver(mut socket_rx: OwnedReadHalf) -> anyhow::Result<()> {
         let Ok(packet_type) = IncomingPacketType::try_from(buf[0]) else {
             continue;
         };
-        match packet_type {
-            IncomingPacketType::Keepalive => tx.send(()).await?,
-            IncomingPacketType::TimeDelayReq => ESP_TIME_CHANNEL.0.send(()).await?,
+        tx.send(()).await?;
+        if let IncomingPacketType::TimeDelayReq = packet_type {
+            ESP_TIME_CHANNEL.0.send(()).await?;
         }
     }
 }
