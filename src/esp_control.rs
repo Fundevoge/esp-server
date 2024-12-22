@@ -1,18 +1,97 @@
-use std::{
-    os::unix::process::CommandExt,
-    process::Command,
-    time::{Duration, SystemTime},
-};
+#![allow(dead_code)]
+use std::{os::unix::process::CommandExt, process::Command, time::Duration};
 
+use anyhow::Context;
+use byteorder::ByteOrder as _;
+use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener, TcpStream,
+    },
     sync::{mpsc, Mutex},
     time::sleep,
+    try_join,
 };
 
 use crate::{AsyncIterator, DisplayFrame, PLAYBACK_STREAM};
+
+const PACKET_FILLER: u8 = 0b01010110;
+
+enum OutgoingPacketType {
+    TimeSync,
+    TimeFollowUp,
+    TimeDelayResp,
+    StateChange,
+}
+
+impl From<OutgoingPacketType> for u8 {
+    fn from(val: OutgoingPacketType) -> Self {
+        match val {
+            OutgoingPacketType::TimeSync => 0,
+            OutgoingPacketType::TimeFollowUp => 1,
+            OutgoingPacketType::TimeDelayResp => 2,
+            OutgoingPacketType::StateChange => 3,
+        }
+    }
+}
+
+enum IncomingPacketType {
+    Keepalive,
+    TimeDelayReq,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum State {
+    Stream,
+    Clock(ClockType),
+    Off,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State::Clock(ClockType::Large)
+    }
+}
+
+impl From<State> for u8 {
+    fn from(val: State) -> Self {
+        match val {
+            State::Stream => 1,
+            State::Clock(clock_type) => 2_u8 + u8::from(clock_type),
+            State::Off => 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum ClockType {
+    Small,
+    Large,
+}
+
+impl From<ClockType> for u8 {
+    fn from(val: ClockType) -> Self {
+        match val {
+            ClockType::Small => 0,
+            ClockType::Large => 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for IncomingPacketType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(IncomingPacketType::Keepalive),
+            1 => Ok(IncomingPacketType::TimeDelayReq),
+            _ => Err(()),
+        }
+    }
+}
 
 pub async fn start_stream(
     stream: Box<dyn AsyncIterator<Item = DisplayFrame> + Send>,
@@ -21,7 +100,11 @@ pub async fn start_stream(
     *playback_stream = Some(stream);
     drop(playback_stream);
 
-    ESP_CONTROL_CHANNEL.0.send(()).await?;
+    let mut packet = [PACKET_FILLER; 64];
+    packet[0] = OutgoingPacketType::StateChange.into();
+    packet[1] = State::Stream.into();
+
+    ESP_PACKET_CHANNEL.0.send(packet).await?;
     Ok(())
 }
 
@@ -60,102 +143,106 @@ async fn handle_esp_stream_connection(mut tcp_stream: TcpStream) -> anyhow::Resu
     }
 }
 
-pub async fn esp_state_controller() -> anyhow::Result<()> {
-    log::info!("[ESP] STATE Binding controller...");
+pub async fn esp_main_controller() -> anyhow::Result<()> {
+    log::info!("[ESP] MAIN Binding controller...");
     let tcp_listener = TcpListener::bind("192.168.178.30:3124").await?;
-    log::info!("[ESP] STATE Controller bound!");
+    log::info!("[ESP] MAIN Controller bound!");
 
     loop {
         let (stream, _) = tcp_listener.accept().await?;
-        log::info!("[ESP] STATE Client connected!");
-        if let Err(e) = handle_esp_state_connection(stream).await {
-            log::warn!("[ESP] STATE Connection ended with error: {e}");
+        log::info!("[ESP] MAIN Client connected!");
+        if let Err(e) = handle_esp_main_connection(stream).await {
+            log::warn!("[ESP] MAIN Connection ended with error: {e}");
         }
     }
 }
 
-async fn handle_esp_state_connection(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
-    let mut receiver = ESP_CONTROL_CHANNEL.1.lock().await;
+async fn handle_esp_main_connection(tcp_stream: TcpStream) -> anyhow::Result<()> {
     tcp_stream.set_nodelay(true)?;
+    let (rx, tx) = tcp_stream.into_split();
+    let time_handle = tokio::spawn(time_control());
+    let rx_handle = tokio::spawn(esp_main_receiver(rx));
+    let tx_handle = tokio::spawn(esp_main_sender(tx));
+
+    let (rx_err, tx_err, time_err) = try_join!(rx_handle, tx_handle, time_handle)?;
+    rx_err?;
+    tx_err?;
+    time_err
+}
+
+async fn esp_main_receiver(mut socket_rx: OwnedReadHalf) -> anyhow::Result<()> {
+    let mut buf = [0_u8; 64];
+    let (tx, rx) = mpsc::channel::<()>(8);
+    tokio::task::spawn(restart_process_on_timeout(rx));
 
     loop {
-        receiver
-            .recv()
-            .await
-            .expect("State Control channel closed unexpectedly");
-        tcp_stream.write_u8(0xff).await?;
+        socket_rx.read_exact(&mut buf).await?;
+        let Ok(packet_type) = IncomingPacketType::try_from(buf[0]) else {
+            continue;
+        };
+        match packet_type {
+            IncomingPacketType::Keepalive => tx.send(()).await?,
+            IncomingPacketType::TimeDelayReq => ESP_TIME_CHANNEL.0.send(()).await?,
+        }
+        if buf.iter().any(|b| *b != 0b01010110) {
+            restart();
+        };
     }
 }
 
-static ESP_CONTROL_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> = Lazy::new(|| {
+async fn esp_main_sender(mut tx: OwnedWriteHalf) -> anyhow::Result<()> {
+    let mut packet_receiver = ESP_PACKET_CHANNEL.1.lock().await;
+    loop {
+        let packet = packet_receiver.recv().await.context("Receiving failed")?;
+        tx.write_all(&packet).await?;
+    }
+}
+
+fn write_naive_datetime(transmit_buffer: &mut [u8], date_time: DateTime<Utc>) {
+    byteorder::LE::write_i64(&mut transmit_buffer[0..8], date_time.timestamp());
+    byteorder::LE::write_u32(
+        &mut transmit_buffer[8..12],
+        date_time.timestamp_subsec_nanos(),
+    );
+}
+
+async fn time_control() -> anyhow::Result<()> {
+    let mut time_request_receiver = ESP_TIME_CHANNEL.1.lock().await;
+
+    loop {
+        let mut packet = [PACKET_FILLER; 64];
+        packet[0] = OutgoingPacketType::TimeSync.into();
+        let sent_sync = Utc::now();
+        ESP_PACKET_CHANNEL.0.send(packet).await?;
+        sleep(Duration::from_millis(100)).await;
+
+        let mut packet = [PACKET_FILLER; 64];
+        packet[0] = OutgoingPacketType::TimeFollowUp.into();
+        write_naive_datetime(&mut packet[1..], sent_sync);
+        ESP_PACKET_CHANNEL.0.send(packet).await?;
+
+        time_request_receiver.recv().await;
+        let received_delay_request = Utc::now();
+
+        let mut packet = [PACKET_FILLER; 64];
+        packet[0] = OutgoingPacketType::TimeDelayResp.into();
+        write_naive_datetime(&mut packet[1..], received_delay_request);
+        ESP_PACKET_CHANNEL.0.send(packet).await?;
+
+        sleep(Duration::from_secs(60)).await;
+    }
+}
+
+type P = [u8; 64];
+static ESP_PACKET_CHANNEL: Lazy<(mpsc::Sender<P>, Mutex<mpsc::Receiver<P>>)> = Lazy::new(|| {
     let (esp_control_sender, esp_control_receiver) = mpsc::channel(256);
     (esp_control_sender, Mutex::new(esp_control_receiver))
 });
 
-pub async fn esp_time_controller() -> anyhow::Result<()> {
-    log::info!("[ESP] TIME Binding controller...");
-    let tcp_listener = TcpListener::bind("192.168.178.30:3125").await?;
-    log::info!("[ESP] TIME Controller bound!");
-
-    loop {
-        let (stream, _) = tcp_listener.accept().await?;
-        log::info!("[ESP] TIME Client connected!");
-        if let Err(e) = handle_esp_time_connection(stream).await {
-            log::warn!("[ESP] TIME Connection ended with error: {e}");
-        }
-    }
-}
-
-async fn handle_esp_time_connection(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
-    tcp_stream.set_nodelay(true)?;
-    loop {
-        tcp_stream
-            .write_u64_le(
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            )
-            .await?;
-        sleep(Duration::from_secs(15)).await;
-    }
-}
-
-pub async fn esp_keepalive() -> anyhow::Result<()> {
-    log::info!("[ESP] KEEPALIVE Binding controller...");
-    let tcp_listener = TcpListener::bind("192.168.178.30:3126").await?;
-    log::info!("[ESP] KEEPALIVE Controller bound!");
-
-    loop {
-        let (stream, _) = tcp_listener.accept().await?;
-        log::info!("[ESP] KEEPALIVE Client connected!");
-        if let Err(e) = handle_esp_keepalive(stream).await {
-            log::warn!("[ESP] KEEPALIVE Connection ended with error: {e}");
-        }
-    }
-}
-
-async fn handle_esp_keepalive(mut tcp_stream: TcpStream) -> anyhow::Result<()> {
-    tcp_stream.set_nodelay(true)?;
-    let mut buf = [0_u8; 256];
-    let (tx, rx) = mpsc::channel::<()>(8);
-    tokio::task::spawn(restart_process_on_timeout(rx));
-    let mut counter = 0;
-
-    loop {
-        tcp_stream.read_exact(&mut buf).await?;
-        if buf.iter().any(|b| *b != 0b01010110) {
-            restart();
-        }
-        tx.send(()).await?;
-
-        for b in &mut buf {
-            *b = 0;
-        }
-        log::trace!("[ESP] KEEPALIVE counter={counter}");
-        counter += 1;
-    }
-}
+static ESP_TIME_CHANNEL: Lazy<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> = Lazy::new(|| {
+    let (esp_control_sender, esp_control_receiver) = mpsc::channel(256);
+    (esp_control_sender, Mutex::new(esp_control_receiver))
+});
 
 async fn restart_process_on_timeout(mut rx: mpsc::Receiver<()>) {
     loop {

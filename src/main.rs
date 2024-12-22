@@ -94,26 +94,17 @@ async fn main() -> anyhow::Result<()> {
     drop(playback_stream);
 
     let handle_stream = tokio::spawn(esp_control::esp_stream_controller());
-    let handle_state = tokio::spawn(esp_control::esp_state_controller());
-    let handle_time = tokio::spawn(esp_control::esp_time_controller());
-    let handle_keepalive = tokio::spawn(esp_control::esp_keepalive());
+    let handle_main = tokio::spawn(esp_control::esp_main_controller());
 
     let handle_webserver = tokio::spawn(
         axum::serve(http_listener, app_router)
             .with_graceful_shutdown(shutdown_signal())
             .into_future(),
     );
-    let (stream_err, state_err, time_err, keepalive_err, webserver_err) = try_join!(
-        handle_keepalive,
-        handle_state,
-        handle_stream,
-        handle_time,
-        handle_webserver
-    )?;
+    let (main_err, stream_err, webserver_err) =
+        try_join!(handle_main, handle_stream, handle_webserver)?;
     stream_err?;
-    state_err?;
-    time_err?;
-    keepalive_err?;
+    main_err?;
     webserver_err?;
 
     Ok(())
