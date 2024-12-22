@@ -184,9 +184,6 @@ async fn esp_main_receiver(mut socket_rx: OwnedReadHalf) -> anyhow::Result<()> {
             IncomingPacketType::Keepalive => tx.send(()).await?,
             IncomingPacketType::TimeDelayReq => ESP_TIME_CHANNEL.0.send(()).await?,
         }
-        if buf.iter().any(|b| *b != 0b01010110) {
-            restart();
-        };
     }
 }
 
