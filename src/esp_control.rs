@@ -111,7 +111,13 @@ pub async fn start_stream(
 
 pub async fn esp_stream_controller() -> anyhow::Result<()> {
     log::info!("[ESP] STREAM Binding controller...");
-    let tcp_listener = TcpListener::bind("192.168.178.30:3123").await?;
+    let tcp_listener = loop {
+        let tcp_listener = TcpListener::bind("192.168.178.30:3123").await;
+        if let Ok(tcp_listener) = tcp_listener {
+            break tcp_listener;
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    };
     log::info!("[ESP] STREAM Controller bound!");
 
     loop {
@@ -146,7 +152,13 @@ async fn handle_esp_stream_connection(mut tcp_stream: TcpStream) -> anyhow::Resu
 
 pub async fn esp_main_controller() -> anyhow::Result<()> {
     log::info!("[ESP] MAIN Binding controller...");
-    let tcp_listener = TcpListener::bind("192.168.178.30:3124").await?;
+    let tcp_listener = loop {
+        let tcp_listener = TcpListener::bind("192.168.178.30:3124").await;
+        if let Ok(tcp_listener) = tcp_listener {
+            break tcp_listener;
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    };
     log::info!("[ESP] MAIN Controller bound!");
 
     loop {
