@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use axum::{
     http::StatusCode,
@@ -125,7 +125,18 @@ pub async fn init_server() -> anyhow::Result<(TcpListener, Router)> {
         SCRIPT_FILE_IDS.write().await,
     )?;
 
-    let http_listener = tokio::net::TcpListener::bind("192.168.178.30:3122").await?;
+    log::info!("[WEB] MAIN Binding Listener...");
+    let http_listener = loop {
+        let http_listener = TcpListener::bind("192.168.178.30:3122").await;
+        match http_listener {
+            Ok(http_listener) => break http_listener,
+            Err(e) => {
+                log::warn!("[WEB] MAIN Binding Listener Failed, retrying...");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        }
+    };
+    log::info!("[WEB] MAIN Listener bound!");
     let app_router = Router::new()
         .route("/", get(root_handler))
         .route("/api/persist_video_upload", post(persist_video_upload))
